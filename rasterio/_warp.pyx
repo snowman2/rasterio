@@ -287,15 +287,11 @@ def _reproject(
         Output is written to destination.
     """
     cdef int retval
-    cdef int rows
-    cdef int cols
     cdef int src_count
     cdef GDALDriverH driver = NULL
     cdef GDALDatasetH src_dataset = NULL
     cdef GDALDatasetH dst_dataset = NULL
     cdef GDALAccess GA
-    cdef double gt[6]
-    cdef char *dstwkt= NULL
     cdef OGRSpatialReferenceH src_osr = NULL
     cdef OGRSpatialReferenceH dst_osr = NULL
     cdef char **warp_extras = NULL
@@ -339,8 +335,10 @@ def _reproject(
             source = source.reshape(1, *source.shape)
         src_count = source.shape[0]
         src_bidx = range(1, src_count + 1)
-        src_dataset = InMemoryRaster(image=source, transform=format_transform(src_transform),
-                                     gcps=gcps, crs=src_crs).handle()
+        src_dataset = InMemoryRaster(image=source,
+                                     transform=format_transform(src_transform),
+                                     gcps=gcps,
+                                     crs=src_crs).handle()
     # If the source is a rasterio MultiBand, no copy necessary.
     # A MultiBand is a tuple: (dataset, bidx, dtype, shape(2d))
     elif isinstance(source, tuple):
@@ -369,21 +367,9 @@ def _reproject(
                 raise ValueError("Invalid destination shape")
             dst_bidx = src_bidx
 
-        try:
-            driver = exc_wrap_pointer(GDALGetDriverByName("MEM"))
-        except:
-            raise DriverRegistrationError(
-                "'MEM' driver not found. Check that this call is contained "
-                "in a `with rasterio.Env()` or `with rasterio.open()` "
-                "block.")
-
-        count, rows, cols = destination.shape
-
-        datasetname = str(uuid.uuid4()).encode('utf-8')
-        dst_dataset = exc_wrap_pointer(
-            GDALCreate(driver, <const char *>datasetname, cols, rows, count,
-                dtypes.dtype_rev[np.dtype(destination.dtype).name], NULL))
-
+        dst_dataset = InMemoryRaster(image=destination,
+                                     transform=format_transform(dst_transform),
+                                     crs=dst_crs).handle()
         if dst_alpha:
             for i in range(destination.shape[0]):
                 try:
@@ -398,27 +384,6 @@ def _reproject(
 
         log.debug("Created temp destination dataset.")
 
-        dst_transform = format_transform(dst_transform).to_gdal()
-        for i in range(6):
-            gt[i] = dst_transform[i]
-
-        exc_wrap_int(GDALSetGeoTransform(dst_dataset, gt))
-
-        try:
-            dst_osr = _osr_from_crs(dst_crs)
-            OSRExportToWkt(dst_osr, &dstwkt)
-
-            log.debug("CRS for temp destination dataset: %s.", dstwkt)
-
-            exc_wrap_int(GDALSetProjection(dst_dataset, dstwkt))
-        finally:
-            CPLFree(dstwkt)
-            _safe_osr_release(dst_osr)
-
-        exc_wrap_int(io_auto(destination, dst_dataset, 1))
-
-        log.debug("Wrote array to temp output dataset")
-
         if dst_nodata is None:
             if hasattr(destination, "fill_value"):
                 # destination is a masked array
@@ -430,7 +395,6 @@ def _reproject(
         udr, dst_bidx, _, _ = destination
         if isinstance(dst_bidx, int):
             dst_bidx = [dst_bidx]
-        udr = destination.ds
         dst_dataset = (<DatasetReaderBase?>udr).handle()
         if dst_nodata is None:
             dst_nodata = udr.nodata
