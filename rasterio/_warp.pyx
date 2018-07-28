@@ -289,6 +289,7 @@ def _reproject(
     cdef int retval
     cdef int rows
     cdef int cols
+    cdef int src_count
     cdef GDALDriverH driver = NULL
     cdef GDALDatasetH src_dataset = NULL
     cdef GDALDatasetH dst_dataset = NULL
@@ -339,6 +340,12 @@ def _reproject(
         if src_nodata is None and hasattr(source, 'fill_value'):
             # source is a masked array
             src_nodata = source.fill_value
+        # Convert 2D single-band arrays to 3D multi-band.
+        if len(source.shape) == 2:
+            source = source.reshape(1, *source.shape)
+        src_count = source.shape[0]
+        src_bidx = range(1, src_count + 1)
+
         src_dataset = InMemoryRaster(image=source, transform=src_transform, gcps=gcps, crs=src_crs).handle()
     # If the source is a rasterio MultiBand, no copy necessary.
     # A MultiBand is a tuple: (dataset, bidx, dtype, shape(2d))
