@@ -336,6 +336,9 @@ def _reproject(
     # We need a src_transform and src_dst in this case. These will
     # be copied to the MEM dataset.
     if dtypes.is_ndarray(source):
+        if src_nodata is None and hasattr(source, 'fill_value'):
+            # source is a masked array
+            src_nodata = source.fill_value
         src_dataset = InMemoryRaster(image=source, transform=src_transform, gcps=gcps, crs=src_crs).handle()
     # If the source is a rasterio MultiBand, no copy necessary.
     # A MultiBand is a tuple: (dataset, bidx, dtype, shape(2d))
