@@ -1658,8 +1658,14 @@ cdef class InMemoryRaster:
             raise ValueError("width must be > 0")
 
         self.band_ids[0] = 1
+        try:
+            memdriver = exc_wrap_pointer(GDALGetDriverByName("MEM"))
+        except Exception:
+            raise DriverRegistrationError(
+                "'MEM' driver not found. Check that this call is contained "
+                "in a `with rasterio.Env()` or `with rasterio.open()` "
+                "block.")
 
-        memdriver = exc_wrap_pointer(GDALGetDriverByName("MEM"))
         datasetname = str(uuid.uuid4()).encode('utf-8')
         self._hds = exc_wrap_pointer(
             GDALCreate(memdriver, <const char *>datasetname, width, height,
@@ -1676,30 +1682,35 @@ cdef class InMemoryRaster:
 
             if crs:
                 osr = _osr_from_crs(crs)
-                OSRExportToWkt(osr, <char**>&srcwkt)
-                GDALSetProjection(self._hds, srcwkt)
-                log.debug("Set CRS on temp source dataset: %s", srcwkt)
-                CPLFree(<void *>srcwkt)
-                _safe_osr_release(osr)
+                try:
+                    OSRExportToWkt(osr, <char**>&srcwkt)
+                    GDALSetProjection(self._hds, srcwkt)
+                    log.debug("Set CRS on temp source dataset: %s", srcwkt)
+                finally:
+                    CPLFree(<void *>srcwkt)
+                    _safe_osr_release(osr)
 
         elif gcps and crs:
-            gcplist = <GDAL_GCP *>CPLMalloc(len(gcps) * sizeof(GDAL_GCP))
-            for i, obj in enumerate(gcps):
-                ident = str(i).encode('utf-8')
-                info = "".encode('utf-8')
-                gcplist[i].pszId = ident
-                gcplist[i].pszInfo = info
-                gcplist[i].dfGCPPixel = obj.col
-                gcplist[i].dfGCPLine = obj.row
-                gcplist[i].dfGCPX = obj.x
-                gcplist[i].dfGCPY = obj.y
-                gcplist[i].dfGCPZ = obj.z or 0.0
+            try:
+                gcplist = <GDAL_GCP *>CPLMalloc(len(gcps) * sizeof(GDAL_GCP))
+                for i, obj in enumerate(gcps):
+                    ident = str(i).encode('utf-8')
+                    info = "".encode('utf-8')
+                    gcplist[i].pszId = ident
+                    gcplist[i].pszInfo = info
+                    gcplist[i].dfGCPPixel = obj.col
+                    gcplist[i].dfGCPLine = obj.row
+                    gcplist[i].dfGCPX = obj.x
+                    gcplist[i].dfGCPY = obj.y
+                    gcplist[i].dfGCPZ = obj.z or 0.0
 
-            osr = _osr_from_crs(crs)
-            OSRExportToWkt(osr, <char**>&srcwkt)
-            GDALSetGCPs(self._hds, len(gcps), gcplist, srcwkt)
-            CPLFree(gcplist)
-            CPLFree(<void *>srcwkt)
+                osr = _osr_from_crs(crs)
+                OSRExportToWkt(osr, <char**>&srcwkt)
+                GDALSetGCPs(self._hds, len(gcps), gcplist, srcwkt)
+            finally:
+                CPLFree(gcplist)
+                CPLFree(<void *>srcwkt)
+                _safe_osr_release(osr)
 
         if self._image is not None:
             self.write(self._image)
