@@ -289,13 +289,11 @@ def _reproject(
     cdef int retval
     cdef int rows
     cdef int cols
-    cdef int src_count
     cdef GDALDriverH driver = NULL
     cdef GDALDatasetH src_dataset = NULL
     cdef GDALDatasetH dst_dataset = NULL
     cdef GDALAccess GA
     cdef double gt[6]
-    cdef char *srcwkt = NULL
     cdef char *dstwkt= NULL
     cdef OGRSpatialReferenceH src_osr = NULL
     cdef OGRSpatialReferenceH dst_osr = NULL
@@ -308,25 +306,20 @@ def _reproject(
     cdef GDALTransformerFunc pfnTransformer = NULL
     cdef GDALWarpOptions *psWOptions = NULL
 
-    # If working with identity transform, assume it is crs-less data
-    # and that translating the matrix very slightly will avoid #674
-    eps = 1e-100
+    def format_transform(in_transform):
+        in_transform = guard_transform(in_transform)
+        # If working with identity transform, assume it is crs-less data
+        # and that translating the matrix very slightly will avoid #674 and #1272
+        eps = 1e-100
+        if in_transform.almost_equals(identity) or in_transform.almost_equals(Affine(1, 0, 0, 0, -1, 0)):
+            in_transform = in_transform.translation(eps, eps)
+        return in_transform.to_gdal()
 
     if src_transform:
-
-        src_transform = guard_transform(src_transform)
-        # if src_transform is like `identity` with positive or negative `e`,
-        # translate matrix very slightly to avoid #674 and #1272.
-        if src_transform.almost_equals(identity) or src_transform.almost_equals(Affine(1, 0, 0, 0, -1, 0)):
-            src_transform = src_transform.translation(eps, eps)
-        src_transform = src_transform.to_gdal()
+        src_transform = format_transform(src_transform)
 
     if dst_transform:
-
-        dst_transform = guard_transform(dst_transform)
-        if dst_transform.almost_equals(identity) or dst_transform.almost_equals(Affine(1, 0, 0, 0, -1, 0)):
-            dst_transform = dst_transform.translation(eps, eps)
-        dst_transform = dst_transform.to_gdal()
+        dst_transform = format_transform(dst_transform)
 
     # Validate nodata values immediately.
     if src_nodata is not None:
@@ -338,85 +331,14 @@ def _reproject(
         if not in_dtype_range(dst_nodata, destination.dtype):
             raise ValueError("dst_nodata must be in valid range for "
                              "destination dtype")
-
+        
     # If the source is an ndarray, we copy to a MEM dataset.
     # We need a src_transform and src_dst in this case. These will
     # be copied to the MEM dataset.
     if dtypes.is_ndarray(source):
-        # Convert 2D single-band arrays to 3D multi-band.
-        if len(source.shape) == 2:
-            source = source.reshape(1, *source.shape)
-        src_count = source.shape[0]
-        src_bidx = range(1, src_count + 1)
-        rows = source.shape[1]
-        cols = source.shape[2]
-        dtype = np.dtype(source.dtype).name
-
-        if src_nodata is None and hasattr(source, 'fill_value'):
-            # source is a masked array
-            src_nodata = source.fill_value
-
-        try:
-            driver = exc_wrap_pointer(GDALGetDriverByName("MEM"))
-        except:
-            raise DriverRegistrationError(
-                "'MEM' driver not found. Check that this call is contained "
-                "in a `with rasterio.Env()` or `with rasterio.open()` "
-                "block.")
-
-        datasetname = str(uuid.uuid4()).encode('utf-8')
-        src_dataset = exc_wrap_pointer(
-            GDALCreate(driver, <const char *>datasetname, cols, rows,
-                       src_count, dtypes.dtype_rev[dtype], NULL))
-
-        GDALSetDescription(
-            src_dataset, "Temporary source dataset for _reproject()")
-
-        log.debug("Created temp source dataset")
-
-        try:
-            src_osr = _osr_from_crs(src_crs)
-            OSRExportToWkt(src_osr, &srcwkt)
-
-            if src_transform:
-                for i in range(6):
-                    gt[i] = src_transform[i]
-
-                exc_wrap_int(GDALSetGeoTransform(src_dataset, gt))
-
-                exc_wrap_int(GDALSetProjection(src_dataset, srcwkt))
-
-                log.debug("Set CRS on temp source dataset: %s", srcwkt)
-
-            elif gcps:
-                gcplist = <GDAL_GCP *>CPLMalloc(len(gcps) * sizeof(GDAL_GCP))
-                try:
-                    for i, obj in enumerate(gcps):
-                        ident = str(i).encode('utf-8')
-                        info = "".encode('utf-8')
-                        gcplist[i].pszId = ident
-                        gcplist[i].pszInfo = info
-                        gcplist[i].dfGCPPixel = obj.col
-                        gcplist[i].dfGCPLine = obj.row
-                        gcplist[i].dfGCPX = obj.x
-                        gcplist[i].dfGCPY = obj.y
-                        gcplist[i].dfGCPZ = obj.z or 0.0
-
-                    exc_wrap_int(GDALSetGCPs(src_dataset, len(gcps), gcplist, srcwkt))
-                finally:
-                    CPLFree(gcplist)
-
-        finally:
-            CPLFree(srcwkt)
-            _safe_osr_release(src_osr)
-
-        # Copy arrays to the dataset.
-        exc_wrap_int(io_auto(source, src_dataset, 1))
-
-        log.debug("Wrote array to temp source dataset")
-
+        src_dataset = InMemoryRaster(image=source, transform=src_transform, gcps=gcps, crs=src_crs).handle()
     # If the source is a rasterio MultiBand, no copy necessary.
-    # A MultiBand is a tuple: (dataset, bidx, dtype, shape(2d)).
+    # A MultiBand is a tuple: (dataset, bidx, dtype, shape(2d))
     elif isinstance(source, tuple):
         rdr, src_bidx, dtype, shape = source
         if isinstance(src_bidx, int):
