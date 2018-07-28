@@ -307,21 +307,6 @@ def _reproject(
     cdef GDALTransformerFunc pfnTransformer = NULL
     cdef GDALWarpOptions *psWOptions = NULL
 
-    def format_transform(in_transform):
-        in_transform = guard_transform(in_transform)
-        # If working with identity transform, assume it is crs-less data
-        # and that translating the matrix very slightly will avoid #674 and #1272
-        eps = 1e-100
-        if in_transform.almost_equals(identity) or in_transform.almost_equals(Affine(1, 0, 0, 0, -1, 0)):
-            in_transform = in_transform.translation(eps, eps)
-        return in_transform.to_gdal()
-
-    if src_transform:
-        src_transform = format_transform(src_transform)
-
-    if dst_transform:
-        dst_transform = format_transform(dst_transform)
-
     # Validate nodata values immediately.
     if src_nodata is not None:
         if not in_dtype_range(src_nodata, source.dtype):
@@ -333,6 +318,15 @@ def _reproject(
             raise ValueError("dst_nodata must be in valid range for "
                              "destination dtype")
         
+    def format_transform(in_transform):
+        in_transform = guard_transform(in_transform)
+        # If working with identity transform, assume it is crs-less data
+        # and that translating the matrix very slightly will avoid #674 and #1272
+        eps = 1e-100
+        if in_transform.almost_equals(identity) or in_transform.almost_equals(Affine(1, 0, 0, 0, -1, 0)):
+            in_transform = in_transform.translation(eps, eps)
+        return in_transform
+
     # If the source is an ndarray, we copy to a MEM dataset.
     # We need a src_transform and src_dst in this case. These will
     # be copied to the MEM dataset.
@@ -345,8 +339,8 @@ def _reproject(
             source = source.reshape(1, *source.shape)
         src_count = source.shape[0]
         src_bidx = range(1, src_count + 1)
-
-        src_dataset = InMemoryRaster(image=source, transform=src_transform, gcps=gcps, crs=src_crs).handle()
+        src_dataset = InMemoryRaster(image=source, transform=format_transform(src_transform),
+                                     gcps=gcps, crs=src_crs).handle()
     # If the source is a rasterio MultiBand, no copy necessary.
     # A MultiBand is a tuple: (dataset, bidx, dtype, shape(2d))
     elif isinstance(source, tuple):
@@ -404,6 +398,7 @@ def _reproject(
 
         log.debug("Created temp destination dataset.")
 
+        dst_transform = format_transform(dst_transform).to_gdal()
         for i in range(6):
             gt[i] = dst_transform[i]
 
