@@ -1619,9 +1619,11 @@ cdef class InMemoryRaster:
     This class is only intended for internal use within rasterio to support
     IO with GDAL.  Other memory based operations should use numpy arrays.
     """
-    cdef double gdal_transform[6]
     cdef int band_ids[1]
-    cdef dict __dict__  # enable dynamic attributes
+    cdef double gdal_transform[6]
+    cdef Affine transform
+    cdef GDALDatasetH _hds
+    cdef np.ndarray _image
 
     def __cinit__(self, image=None, dtype='uint8', count=1, width=None,
                   height=None, transform=None, gcps=None, crs=None):
