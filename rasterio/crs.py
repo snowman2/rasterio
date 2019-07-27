@@ -87,7 +87,10 @@ class CRS(collections.Mapping):
     __nonzero__ = __bool__
 
     def __eq__(self, other):
-        other = CRS.from_user_input(other)
+        try:
+            other = CRS.from_user_input(other)
+        except CRSError:
+            return False
         return (self._crs == other._crs)
 
     def __getstate__(self):
@@ -444,6 +447,11 @@ class CRS(collections.Mapping):
         """
         if isinstance(value, cls):
             return value
+        elif hasattr(value, "to_wkt") and callable(value.to_wkt):
+            return cls.from_wkt(
+                value.to_wkt(),
+                morph_from_esri_dialect=morph_from_esri_dialect,
+            )
         elif isinstance(value, int):
             return cls.from_epsg(value)
         elif isinstance(value, dict):
