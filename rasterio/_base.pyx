@@ -521,9 +521,17 @@ cdef class DatasetBase(object):
         False
         """
         def __get__(self):
-            return tuple(
-                [flag for flag in MaskFlags if x & flag.value]
-                for x in self._mask_flags())
+            all_flags = []
+            for iii, band_mask_flag in enumerate(self._mask_flags()):
+                band_mask_enum = MaskFlags(band_mask_flag)
+                if (
+                    band_mask_enum == MaskFlags.all_valid
+                    and self.dtypes[iii] == "int8"
+                    and self.nodatavals[iii] < 0
+                ):
+                    band_mask_enum = MaskFlags.nodata
+                all_flags.append([band_mask_enum])
+            return tuple(all_flags)
 
     def _set_crs(self, value):
         raise DatasetAttributeError("read-only attribute")
