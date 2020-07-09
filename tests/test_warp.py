@@ -7,6 +7,7 @@ from affine import Affine
 import numpy as np
 from numpy.testing import assert_almost_equal
 import pytest
+import xarray
 
 import rasterio
 from rasterio.control import GroundControlPoint
@@ -1122,6 +1123,26 @@ def test_reproject_resampling(path_rgb_byte_tif, method):
     )
 
     assert np.count_nonzero(out) in expected[method]
+
+@pytest.mark.parametrize("test3d,count_nonzero", [(True, 1314520), (False, 438113)])
+def test_reproject_xarray(test3d, count_nonzero, path_rgb_byte_tif):
+    with rasterio.open(path_rgb_byte_tif) as src:
+        if test3d:
+            source = xarray.DataArray(src.read())
+        else:
+            source = xarray.DataArray(src.read(1))
+    out = xarray.DataArray(np.empty(source.shape, dtype=np.uint8))
+    reproject(
+        source,
+        out,
+        src_transform=src.transform,
+        src_crs=src.crs,
+        dst_transform=DST_TRANSFORM,
+        dst_crs="EPSG:3857",
+    )
+    assert isinstance(out, xarray.DataArray)
+    assert out.shape == source.shape
+    assert np.count_nonzero(out) == count_nonzero
 
 
 @pytest.mark.parametrize("method", SUPPORTED_RESAMPLING)

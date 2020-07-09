@@ -11,3 +11,4 @@ pytest-cov>=2.2.0
 sphinx
 sphinx-rtd-theme
 wheel
+xarray
