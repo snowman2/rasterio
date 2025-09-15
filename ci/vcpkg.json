@@ -1,0 +1,16 @@
+{
+    "name": "rasterio",
+    "version": "1.3.10",
+    "dependencies": [
+        {
+            "name": "tiff", 
+            "features": [ "zstd", "lerc", "webp" ],
+            "version>=": "4.3.0"
+        },
+        {
+            "name": "gdal",
+            "version>=": "3.9.1"
+        }
+    ],
+    "builtin-baseline": "73794ce5f63fd138fab999a22959ca7c6305d93c"
+}

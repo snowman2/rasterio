@@ -1,0 +1,226 @@
+name: Wheels & sdist
+
+on:
+  push:
+    branches: [ '*' ]
+  release:
+    types: [ released, prereleased ]
+  pull_request:  # also build on PRs touching this file
+    paths:
+      - ".github/workflows/release.yaml"
+      - "ci/gdal-compile-wheels.sh"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GDAL_VERSION: "3.9.1"
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  make_sdist:
+    name: Make sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Conda
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          init-shell: bash
+          environment-name: sdist_env
+          create-args: >-
+            python-build
+            twine
+            cython
+            gdal=${{ env.GDAL_VERSION }}
+
+
+      - name: Make sdist
+        shell: bash
+        run: |
+          micromamba run -n sdist_env python -m build --sdist
+
+      - name: Check packages
+        shell: bash
+        run: |
+          micromamba run -n sdist_env twine check --strict dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz
+          retention-days: 5
+
+  build_wheels:
+    name: Build ${{ matrix.arch }} wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ github.event_name == 'push' && github.ref_type != 'tag' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: ubuntu-22.04
+          arch: x86_64
+        - os: ubuntu-22.04-arm
+          arch: aarch64
+        - os: macos-13
+          arch: x86_64
+          cmake_osx_architectures: x86_64
+          macos_deployment_target: "13.0"
+        - os: macos-14
+          arch: arm64
+          cmake_osx_architectures: arm64
+          macos_deployment_target: "14.0"
+        - os: "windows-2022"
+          arch: "auto64"
+          triplet: "x64-windows"
+          vcpkg_cache: "c:\\vcpkg\\installed"
+          vcpkg_logs: "c:\\vcpkg\\buildtrees\\**\\*.log"
+        - os: "windows-2022"
+          arch: "auto32"
+          triplet: "x86-windows"
+          vcpkg_cache: "c:\\vcpkg\\installed"
+          vcpkg_logs: "c:\\vcpkg\\buildtrees\\**\\*.log"
+        - os: "windows-11-arm"
+          arch: "ARM64"
+          triplet: "arm64-windows"
+          vcpkg_cache: "c:\\vcpkg\\installed"
+          vcpkg_logs: "c:\\vcpkg\\buildtrees\\**\\*.log"
+          msvc_arch: ARM64
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+
+      - name: Add to rasterio setup.cfg
+        if: contains(matrix.os, 'windows')
+        run: |
+          echo -e "\n[build_ext]" >> setup.cfg
+          echo "include_dirs = C:/vcpkg/installed/${{ matrix.triplet }}/include" >> setup.cfg
+          echo "libraries = gdal" >> setup.cfg
+          echo "library_dirs = C:/vcpkg/installed/${{ matrix.triplet }}/lib" >> setup.cfg
+          cat setup.cfg
+        shell: bash
+
+      - name: Setup MSVC (32-bit)
+        if: ${{ matrix.triplet == 'x86-windows' }}
+        uses: bus1/cabuild/action/msdevshell@e22aba57d6e74891d059d66501b6b5aed8123c4d  # v1
+        with:
+          architecture: 'x86'
+
+      - name: Activate MSVC
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+           arch: ${{ matrix.msvc_arch }}
+        if: ${{ matrix.msvc_arch }}
+
+      - name: Cache vcpkg
+        if: contains(matrix.os, 'windows')
+        uses: actions/cache@v4
+        id: vcpkgcache
+        with:
+          path: |
+            ${{ matrix.vcpkg_cache }}
+          # bump the last digit to avoid using previous build cache
+          key: ${{ matrix.os }}-${{ matrix.triplet }}-vcpkg-gdal${{ env.GDAL_VERSION }}-cache0
+
+      - name: Install GDAL with vcpkg
+        if: contains(matrix.os, 'windows')
+        env:
+          VCPKG_DEFAULT_TRIPLET: ${{ matrix.triplet }}
+        shell: bash
+        run: |
+          # Workaround for vcpkg downloading issue:
+          # https://github.com/microsoft/vcpkg/issues/41199#issuecomment-2378255699
+          export SystemDrive="$SYSTEMDRIVE"
+          export SystemRoot="$SYSTEMROOT"
+          export windir="$WINDIR"
+          cd "$VCPKG_INSTALLATION_ROOT"
+          git pull > nul
+          ./bootstrap-vcpkg.bat -disableMetrics
+          vcpkg install --feature-flags="versions,manifests" --x-manifest-root=${GITHUB_WORKSPACE}/ci --x-install-root=$VCPKG_INSTALLATION_ROOT/installed
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.1.4
+        env:
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_ENVIRONMENT_LINUX:
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+            PACKAGE_DATA=1
+            PROJ_NETWORK=ON
+          CIBW_ENVIRONMENT_MACOS:
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+            CMAKE_OSX_ARCHITECTURES='${{ matrix.cmake_osx_architectures }}'
+            MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_deployment_target }}
+            PACKAGE_DATA=1
+            PROJ_NETWORK=ON
+            GDAL_CONFIG=/usr/local/bin/gdal-config
+            PROJ_DATA=/usr/local/share/proj
+          CIBW_ENVIRONMENT_WINDOWS:
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+            VCPKG_INSTALL="C:/vcpkg/installed/${{ matrix.triplet }}"
+            GDAL_INCLUDE_PATH="$VCPKG_INSTALL/include"
+            GDAL_LIBRARY_PATH="$VCPKG_INSTALL/lib"
+            PACKAGE_DATA=1
+            GDAL_DATA="$VCPKG_INSTALL/share/gdal"
+            PROJ_DATA="$VCPKG_INSTALL/share/proj"
+            PROJ_NETWORK=ON
+            GDAL_CONFIG=/usr/local/bin/gdal-config
+            PROJ_DATA=/usr/local/share/proj
+          CIBW_BEFORE_BUILD_WINDOWS: "python -m pip install delvewheel"
+          # Add Windows System32 explicitly to the path https://github.com/adang1345/delvewheel/issues/54
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: "delvewheel repair --add-path C:/Windows/System32 --add-path C:/vcpkg/installed/${{ matrix.triplet }}/bin -w {dest_dir} {wheel}"
+          CIBW_BEFORE_ALL_LINUX: bash ./ci/gdal-compile-wheels.sh
+          CIBW_BEFORE_ALL_MACOS: bash ./ci/gdal-compile-wheels.sh
+          CIBW_TEST_REQUIRES: attrs pytest click mock boto3 packaging hypothesis fsspec aiohttp requests numpy --config-settings=setup-args="-Dallow-noblas=true"
+          CIBW_TEST_COMMAND: >
+            rio --version &&
+            cp -r {package}/tests . &&
+            python -m pytest -vv tests -m "not gdalbin" -k "not test_ensure_env_decorator_sets_gdal_data_prefix and not test_tiled_dataset_blocksize_guard and not test_untiled_dataset_blocksize and not test_positional_calculation_byindex and not test_transform_geom_polygon and not test_reproject_error_propagation and not test_issue2353 and not test_info_azure_unsigned and not test_datasetreader_ctor_url and not test_outer_boundless_pixel_fidelity"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+          path: ./wheelhouse/*.whl
+          retention-days: 5
+
+  publish:
+    name: Publish on PyPI
+    needs: [make_sdist,build_wheels]
+    if: ${{ github.repository_owner == 'rasterio' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: sdist
+          path: dist
+      - uses: actions/download-artifact@v5
+        continue-on-error: ${{ github.event_name == 'push' && github.ref_type != 'tag' }}
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Upload Wheels to PyPI
+        # release on every tag
+        if: ${{ github.event_name == 'release' && github.ref_type == 'tag' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip_existing: true
+          # repository_url: https://test.pypi.org/legacy/  # To test
+
+
+      - name: Upload Nightly Wheelsref
+        if : ${{ github.ref_type == 'branch' && github.ref_name == 'main' }}
+        uses: scientific-python/upload-nightly-action@b36e8c0c10dbcfd2e05bf95f17ef8c14fd708dbf
+        with:
+          artifacts_path: dist
+          anaconda_nightly_upload_token: ${{ secrets.ANACONDA_ORG_UPLOAD_TOKEN }}
