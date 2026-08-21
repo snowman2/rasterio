@@ -56,6 +56,7 @@ include "gdal.pxi"
 
 log = logging.getLogger(__name__)
 
+cdef const bint NONE = -1
 
 cdef const char *get_driver_name(GDALDriverH driver):
     """Return Python name of the driver"""
@@ -335,6 +336,13 @@ cdef class DatasetBase:
 
         self.mode = 'r'
         self.options = kwargs.copy()
+        self._crs = None
+        self._transform = None
+        self._transform_gdal = None
+        self._count = NONE
+        self._width = NONE
+        self._height = NONE
+        self._shape = None
         self._dtypes = []
         self._block_shapes = None
         self._nodatavals = []
@@ -344,9 +352,7 @@ cdef class DatasetBase:
         self._offsets = ()
         self._gcps = None
         self._rpcs = None
-        self._read = False
 
-        self._set_attrs_from_dataset_handle()
         self._env = ExitStack()
 
     def __repr__(self):
@@ -355,32 +361,16 @@ cdef class DatasetBase:
             self.name,
             self.mode)
 
-    def _set_attrs_from_dataset_handle(self):
-        cdef GDALDriverH driver = NULL
-        driver = GDALGetDatasetDriver(self._hds)
-        self.driver = get_driver_name(driver)
-        self._count = GDALGetRasterCount(self._hds)
-        self.width = GDALGetRasterXSize(self._hds)
-        self.height = GDALGetRasterYSize(self._hds)
-        self.shape = (self.height, self.width)
-        self._transform = self.read_transform()
-        self._crs = self.read_crs()
-
-        # touch self.meta, triggering data type evaluation.
-        _ = self.meta
-
-        log.debug("Dataset %r is started.", self)
-
     cdef GDALDatasetH handle(self) except NULL:
         """Return the object's GDAL dataset handle"""
         if self._hds == NULL:
             raise RasterioIOError("Dataset is closed: {}".format(self.name))
-        else:
-            return self._hds
+        return self._hds
 
     cdef GDALRasterBandH band(self, int bidx) except NULL:
         """Return a GDAL raster band handle"""
         cdef GDALRasterBandH band = NULL
+
         band = GDALGetRasterBand(self.handle(), bidx)
         if band == NULL:
             raise IndexError("No such band index: {!s}".format(bidx))
@@ -428,9 +418,7 @@ cdef class DatasetBase:
         """Return the stored GDAL GeoTransform"""
         cdef double gt[6]
 
-        if self._hds == NULL:
-            raise ValueError("Null dataset")
-        err = GDALGetGeoTransform(self._hds, gt)
+        err = GDALGetGeoTransform(self.handle(), gt)
         if err == GDALError.failure and not self._has_gcps_or_rpcs():
             warnings.warn(
                 ("Dataset has no geotransform, gcps, or rpcs. "
@@ -488,6 +476,16 @@ cdef class DatasetBase:
         return self._hds == NULL
 
     @property
+    def driver(self):
+        if self._driver is not None:
+            return self._driver
+
+        cdef GDALDriverH driver = NULL
+        driver = GDALGetDatasetDriver(self.handle())
+        self._driver = get_driver_name(driver)
+        return self._driver
+
+    @property
     def count(self):
         """The number of raster bands in the dataset
 
@@ -495,11 +493,35 @@ cdef class DatasetBase:
         -------
         int
         """
-        if not self._count:
-            if self._hds == NULL:
-                raise ValueError("Can't read closed raster file")
-            self._count = GDALGetRasterCount(self._hds)
+        if self._count is NONE:
+            return self._count
+
+        self._count = GDALGetRasterCount(self.handle())
         return self._count
+
+    @property
+    def width(self):
+        if self._width is NONE:
+            return self._width
+
+        self._width = GDALGetRasterXSize(self.handle())
+        return self._width
+
+    @property
+    def height(self):
+        if self._height is NONE:
+            return self._height
+
+        self._height = GDALGetRasterYSize(self.handle())
+        return self._height
+
+    @property
+    def shape(self):
+        if self._shape is not None:
+            return self._shape
+
+        self._shape = (self.height, self.width)
+        return self._shape
 
     @property
     def indexes(self):
@@ -524,7 +546,7 @@ cdef class DatasetBase:
         cdef GDALRasterBandH band = NULL
 
         if not self._dtypes:
-            for i in range(self._count):
+            for i in range(self.count):
                 band = self.band(i + 1)
                 self._dtypes.append(_band_dtype(band))
 
@@ -548,7 +570,7 @@ cdef class DatasetBase:
         if self._block_shapes is None:
             self._block_shapes = []
 
-            for i in range(self._count):
+            for i in range(self.count):
                 band = self.band(i + 1)
                 GDALGetBlockSize(band, &xsize, &ysize)
                 self._block_shapes.append((ysize, xsize))
@@ -562,7 +584,7 @@ cdef class DatasetBase:
 
         if not self._nodatavals:
 
-            for i in range(self._count):
+            for i in range(self.count):
                 band = self.band(i + 1)
                 dtype = _band_dtype(band)
 
@@ -687,7 +709,12 @@ cdef class DatasetBase:
         -------
         CRS
         """
-        return self._get_crs()
+        if self._crs is not None:
+            return None if self._crs is False else self._crs
+        self._crs = self.read_crs()
+        if self._crs is None:
+            self._crs = False
+        return self._crs
 
     @crs.setter
     def crs(self, value):
@@ -738,7 +765,10 @@ cdef class DatasetBase:
         -------
         Affine
         """
-        return Affine.from_gdal(*self.get_transform())
+        if self._transform is not None:
+            return self._transform
+        self._transform =  Affine.from_gdal(*self.get_transform())
+        return self._transform
 
     @transform.setter
     def transform(self, value):
@@ -998,7 +1028,6 @@ cdef class DatasetBase:
             'crs': self.crs,
             'transform': self.transform,
         }
-        self._read = True
         return m
 
     @property
@@ -1085,18 +1114,12 @@ cdef class DatasetBase:
         lng, lat = _transform(self.crs, "EPSG:4326", [cx], [cy], None)
         return lng.pop(), lat.pop()
 
-    def _get_crs(self):
-        # _read tells us that the CRS was read before and really is
-        # None.
-        if not self._read and self._crs is None:
-            self._crs = self.read_crs()
-        return self._crs
-
     def get_transform(self):
         """Returns a GDAL geotransform in its native form."""
-        if not self._read and self._transform is None:
-            self._transform = self.read_transform()
-        return self._transform
+        if self._transform_gdal is not None:
+            return self._transform_gdal
+        self._transform_gdal = self.read_transform()
+        return self._transform_gdal
 
     @property
     def subdatasets(self):
@@ -1134,7 +1157,7 @@ cdef class DatasetBase:
         if bidx > 0:
             obj = self.band(bidx)
         else:
-            obj = self._hds
+            obj = self.handle()
 
         namespaces = GDALGetMetadataDomainList(obj)
         num_items = CSLCount(namespaces)
@@ -1167,7 +1190,7 @@ cdef class DatasetBase:
         if bidx > 0:
             obj = self.band(bidx)
         else:
-            obj = self._hds
+            obj = self.handle()
         if ns:
             ns = ns.encode('utf-8')
             domain = ns
@@ -1231,7 +1254,7 @@ cdef class DatasetBase:
         if bidx > 0:
             band = self.band(bidx)
         else:
-            band = self._hds
+            band = self.handle()
 
         if ovr is not None:
             obj = GDALGetOverview(band, ovr)

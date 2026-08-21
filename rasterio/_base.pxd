@@ -4,27 +4,26 @@ include "gdal.pxi"
 cdef class DatasetBase:
 
     cdef GDALDatasetH _hds
-    cdef readonly object name
-    cdef readonly object mode
-    cdef readonly object options
-    cdef readonly object width
-    cdef readonly object height
-    cdef readonly object shape
-    cdef public object driver
-    cdef public object _count
-    cdef public object _dtypes
-    cdef public object _crs
-    cdef public object _crs_wkt
-    cdef public object _transform
-    cdef public object _block_shapes
-    cdef public object _nodatavals
-    cdef public object _units
-    cdef public object _descriptions
-    cdef public object _scales
-    cdef public object _offsets
-    cdef public object _read
-    cdef public object _gcps
-    cdef public object _rpcs
+    cdef readonly str name
+    cdef readonly str mode
+    cdef readonly dict options
+    cdef readonly str _driver
+    cdef readonly bint _count
+    cdef readonly bint _width
+    cdef readonly bint _height
+    cdef readonly tuple _shape
+    cdef readonly list _dtypes
+    cdef readonly object _crs
+    cdef readonly object _transform
+    cdef readonly list _transform_gdal
+    cdef readonly list _block_shapes
+    cdef readonly list _nodatavals
+    cdef readonly tuple _units
+    cdef readonly tuple _descriptions
+    cdef readonly tuple _scales
+    cdef readonly tuple _offsets
+    cdef readonly object _gcps
+    cdef readonly object _rpcs
     cdef public object _env
     cdef GDALDatasetH handle(self) except NULL
     cdef GDALRasterBandH band(self, int bidx) except NULL

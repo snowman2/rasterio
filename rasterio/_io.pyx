@@ -891,10 +891,10 @@ cdef class DatasetReaderBase(DatasetBase):
                         if MaskFlags.nodata in flags:
                             warnings.warn(NodataShadowWarning())
 
-                io_multi_mask(self._hds, 0, xoff, yoff, width, height, out, indexes_arr, resampling=resampling.value)
+                io_multi_mask(self.handle(), 0, xoff, yoff, width, height, out, indexes_arr, resampling=resampling.value)
 
             else:
-                io_multi_band(self._hds, 0, xoff, yoff, width, height, out, indexes_arr, resampling=resampling.value)
+                io_multi_band(self.handle(), 0, xoff, yoff, width, height, out, indexes_arr, resampling=resampling.value)
 
         except CPLE_BaseError as cplerr:
             raise RasterioIOError("Read failed. See previous exception for details.") from cplerr
@@ -1096,7 +1096,7 @@ cdef class DatasetReaderBase(DatasetBase):
         band = self.band(bidx)
 
         if clear_cache:
-            GDALDatasetClearStatistics(self._hds)
+            GDALDatasetClearStatistics(self.handle())
 
         try:
             exc_wrap_int(
@@ -1507,15 +1507,16 @@ cdef class DatasetWriterBase(DatasetReaderBase):
 
         self.name = filename
         self.mode = mode
-        self.driver = driver
-        self.width = width
-        self.height = height
+        self._driver = driver
+        self._width = width
+        self._height = height
         self._count = count
         self._init_nodata = nodata
         self._count = count
         self._crs = crs
         if transform is not None:
-            self._transform = transform.to_gdal()
+            self._transform = transform
+            self._transform_gdal = transform.to_gdal()
         self._gcps = None
         self._rpcs = None
         self._init_gcps = gcps
@@ -1536,18 +1537,6 @@ cdef class DatasetWriterBase(DatasetReaderBase):
             if self._init_rpcs:
                 self._set_rpcs(self._init_rpcs)
 
-        drv = GDALGetDatasetDriver(self._hds)
-        drv_name = GDALGetDriverShortName(drv)
-        self.driver = drv_name.decode('utf-8')
-
-        self._count = GDALGetRasterCount(self._hds)
-        self.width = GDALGetRasterXSize(self._hds)
-        self.height = GDALGetRasterYSize(self._hds)
-        self.shape = (self.height, self.width)
-
-        self._transform = self.read_transform()
-        self._crs = self.read_crs()
-        _ = self.meta
         self._env = ExitStack()
 
     def __repr__(self):
@@ -1607,9 +1596,6 @@ cdef class DatasetWriterBase(DatasetReaderBase):
             raise ValueError("One unit for each band is required")
 
     def write_transform(self, transform):
-        if self._hds == NULL:
-            raise ValueError("Can't read closed raster file")
-
         if [abs(v) for v in transform] == [0, 1, 0, 0, 0, 1]:
             warnings.warn(
                 "The given matrix is equal to Affine.identity or its flipped counterpart. "
@@ -1621,10 +1607,10 @@ cdef class DatasetWriterBase(DatasetReaderBase):
         cdef double gt[6]
         for i in range(6):
             gt[i] = transform[i]
-        err = GDALSetGeoTransform(self._hds, gt)
+        err = GDALSetGeoTransform(self.handle(), gt)
         if err:
             raise ValueError("transform not set: %s" % transform)
-        self._transform = transform
+        self._transform_gdal = list(transform)
 
     def _set_nodatavals(self, vals):
         cdef GDALRasterBandH band = NULL
@@ -1640,7 +1626,7 @@ cdef class DatasetWriterBase(DatasetReaderBase):
                 success = GDALSetRasterNoDataValue(band, nodataval)
             if success:
                 raise ValueError("Invalid nodata value: %r", val)
-        self._nodatavals = vals
+        self._nodatavals = list(vals)
 
     def write(self, arr, indexes=None, window=None, masked=False):
         """Write the arr array into indexed bands of the dataset.
@@ -1774,7 +1760,7 @@ cdef class DatasetWriterBase(DatasetReaderBase):
         -------
         None
         """
-        GDALDatasetClearStatistics(self._hds)
+        GDALDatasetClearStatistics(self.handle())
 
     def update_stats(self, *, stats=None, indexes=None, approx=False):
         """Update stored statistics for all dataset bands.
@@ -1837,7 +1823,7 @@ cdef class DatasetWriterBase(DatasetReaderBase):
         if bidx > 0:
             hobj = self.band(bidx)
         else:
-            hobj = self._hds
+            hobj = self.handle()
         if ns:
             domain_b = ns.encode('utf-8')
             domain_c = domain_b
@@ -2063,9 +2049,9 @@ cdef class DatasetWriterBase(DatasetReaderBase):
             try:
                 resampling_b = resampling_alg.encode('utf-8')
                 resampling_c = resampling_b
-                GDALFlushCache(self._hds)
+                GDALFlushCache(self.handle())
                 exc_wrap_int(
-                    GDALBuildOverviews(self._hds, resampling_c,
+                    GDALBuildOverviews(self.handle(), resampling_c,
                                        len(factors), factors_c, 0, NULL, NULL,
                                        NULL))
             finally:
@@ -2289,15 +2275,16 @@ cdef class BufferedDatasetWriterBase(DatasetWriterBase):
 
         self.name = path.name
         self.mode = mode
-        self.driver = driver
-        self.width = width
-        self.height = height
+        self._driver = driver
+        self._width = width
+        self._height = height
         self._count = count
         self._init_nodata = nodata
         self._count = count
         self._crs = crs
         if transform is not None:
-            self._transform = transform.to_gdal()
+            self._transform = transform
+            self._transform_gdal = transform.to_gdal()
         self._gcps = None
         self._init_gcps = gcps
         self._rpcs = None
@@ -2358,20 +2345,9 @@ cdef class BufferedDatasetWriterBase(DatasetWriterBase):
             self.driver = get_driver_name(drv).decode('utf-8')
             GDALClose(temp)
 
-        # Instead of calling _begin() we do the following.
-
-        self._count = GDALGetRasterCount(self._hds)
-        self.width = GDALGetRasterXSize(self._hds)
-        self.height = GDALGetRasterYSize(self._hds)
-        self.shape = (self.height, self.width)
-
-        self._transform = self.read_transform()
-        self._crs = self.read_crs()
-
         if options != NULL:
             CSLDestroy(options)
 
-        _ = self.meta
         self._env = ExitStack()
 
     def stop(self):
